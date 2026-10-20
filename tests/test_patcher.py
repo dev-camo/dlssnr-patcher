@@ -519,6 +519,7 @@ mbarrier.try_wait.shared::cta.b64 P_OUT, [%r2], %rd2;
 }
 red.global.v4.f16x2.add.noftz [%rd3], {%r5, %r6, %r7, %r8};
 fence.release.gpu;
+fence.acquire.gpu;
 min.relu.s32 %r10, %r11, %r12;
 """
     FP8_SOURCE = """
@@ -562,9 +563,12 @@ mbarrier.try_wait.shared::cta.b64 %p1, [%r18], %rd2;
         self.assertIn("mbarrier.arrive.shared::cta.b64 %rd2, [%r2];", output)
         self.assertIn("mbarrier.test_wait.shared::cta.b64", output)
         self.assertEqual(output.count("red.global.f16x2.add.noftz"), 4)
-        self.assertIn("fence.acq_rel.gpu;", output)
+        self.assertEqual(output.count("fence.acq_rel.gpu;"), 2)
+        self.assertNotIn("fence.acquire", output)
         self.assertIn("max.s32 %r10, %r10, 0;", output)
         self.assertEqual(stats.values["bulk_copy"], 1)
+        self.assertEqual(stats.values["release_fence"], 1)
+        self.assertEqual(stats.values["acquire_fence"], 1)
 
     def test_transform_uses_selected_target(self) -> None:
         output, _stats = patcher.transform_ptx(self.SOURCE, patcher.AMPERE)
@@ -589,6 +593,11 @@ mbarrier.try_wait.shared::cta.b64 %p1, [%r18], %rd2;
                 source = self.SOURCE.replace(instruction, replacement)
                 with self.assertRaisesRegex(patcher.PatchError, message):
                     patcher.transform_ptx(source)
+
+    def test_reject_unsupported_acquire_fence_scope(self) -> None:
+        source = self.SOURCE.replace("fence.acquire.gpu;", "fence.acquire.sys;")
+        with self.assertRaisesRegex(patcher.PatchError, "fence.acquire"):
+            patcher.transform_ptx(source)
 
     def test_transform_ampere_fp8_operations(self) -> None:
         output, stats = patcher.transform_ptx(self.FP8_SOURCE, patcher.AMPERE)

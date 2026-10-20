@@ -1578,10 +1578,13 @@ def transform_ptx(
     stats.add("vector_reduction", reduction_count)
 
     # Use the acquire-release fence accepted by older targets in place of
-    # release-only.
+    # release-only and acquire-only. It orders a superset of both.
     fence_count = output.count("fence.release.gpu;")
     output = output.replace("fence.release.gpu;", "fence.acq_rel.gpu;")
     stats.add("release_fence", fence_count)
+    acquire_fence_count = output.count("fence.acquire.gpu;")
+    output = output.replace("fence.acquire.gpu;", "fence.acq_rel.gpu;")
+    stats.add("acquire_fence", acquire_fence_count)
 
     # Expand fused signed minimum/ReLU into operations older targets support.
     min_relu_pattern = re.compile(
@@ -1610,6 +1613,7 @@ def transform_ptx(
         "red.global.v4",
         "min.relu",
         "fence.release.gpu",
+        "fence.acquire",
     )
     if target.cuda < ADA.cuda:
         unsupported += ("e4m3",)
