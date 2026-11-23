@@ -561,8 +561,13 @@ def extract_images(fatbin_path: Path, work_dir: Path, cuobjdump: Path) -> list[I
     elf_list = run_tool([cuobjdump, "--list-elf", fatbin_path]).stdout
     ptx_names = parse_listed_images(ptx_list, "PTX")
     elf_names = parse_listed_images(elf_list, "ELF")
-    if not ptx_names or not elf_names:
-        raise PatchError("A CUDA fatbin does not contain both PTX and ELF images.")
+    if not ptx_names and not elf_names:
+        raise PatchError("A CUDA fatbin contains no PTX or ELF images.")
+
+    if ptx_names:
+        run_tool([cuobjdump, "--extract-ptx", "all", fatbin_path], cwd=work_dir)
+    if elf_names:
+        run_tool([cuobjdump, "--extract-elf", "all", fatbin_path], cwd=work_dir)
 
     run_tool([cuobjdump, "--extract-ptx", "all", fatbin_path], cwd=work_dir)
     run_tool([cuobjdump, "--extract-elf", "all", fatbin_path], cwd=work_dir)
@@ -1583,6 +1588,11 @@ def transform_ptx(
     output = output.replace("fence.release.gpu;", "fence.acq_rel.gpu;")
     stats.add("release_fence", fence_count)
 
+    # Acquire-only fences require sm_90; acq_rel is supported from sm_70.
+    fence_count = output.count("fence.acquire.gpu;")
+    output = output.replace("fence.acquire.gpu;", "fence.acq_rel.gpu;")
+    stats.add("acquire_fence", fence_count)
+
     # Expand fused signed minimum/ReLU into operations older targets support.
     min_relu_pattern = re.compile(
         rf"(?P<guard>@!?{PTX_PREDICATE}\s+)?min\.relu\.s32\s+"
@@ -2080,26 +2090,32 @@ def repack_fatbin(
 
     images = extract_images(source_path, work_dir, tools.cuobjdump)
     ptx_images = [image for image in images if image.kind == "ptx"]
-    if len(ptx_images) != 1:
+
+    source_ptx = None
+    source_arch = None
+
+    if len(ptx_images) > 1:
         raise PatchError(
-            f"Fatbin {index} has {len(ptx_images)} PTX images. Exactly one is required."
+            f"Fatbin {index} has {len(ptx_images)} PTX images. At most one is supported."
         )
 
-    source_ptx_image = ptx_images[0]
-    source_ptx_bytes = source_ptx_image.path.read_bytes()
-    try:
-        source_ptx = source_ptx_bytes.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise PatchError(f"Fatbin {index} PTX is not UTF-8 text.") from error
-    source_arch = parse_ptx_target(source_ptx)
-    if source_arch != source_ptx_image.architecture:
-        raise PatchError(
-            f"Fatbin {index} PTX target sm_{source_arch} does not match its image name."
-        )
-    if not any(
-        image.kind == "elf" and image.architecture == source_arch for image in images
-    ):
-        raise PatchError(f"Fatbin {index} has no sm_{source_arch} ELF image.")
+    if ptx_images:
+        source_ptx_bytes = ptx_images[0].path.read_bytes()
+        try:
+            source_ptx = source_ptx_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise PatchError(f"Fatbin {index} PTX is not UTF-8 text.") from error
+
+        source_arch = parse_ptx_target(source_ptx)
+        if source_arch != ptx_images[0].architecture:
+            raise PatchError(
+                f"Fatbin {index} PTX target sm_{source_arch} does not match its image name."
+            )
+        if not any(
+            image.kind == "elf" and image.architecture == source_arch
+            for image in images
+        ):
+            raise PatchError(f"Fatbin {index} has no sm_{source_arch} ELF image.")
 
     elf_images: dict[int, list[Image]] = {}
     for image in images:
@@ -2146,6 +2162,12 @@ def repack_fatbin(
                 ArchitectureBuild(target, existing[0].path.stat().st_size, False)
             )
             continue
+
+        if source_ptx is None:
+            raise PatchError(
+                f"Fatbin {index} has no PTX image and no existing "
+                f"{target.cuda_name} ELF image to preserve."
+            )
 
         transformed_ptx, stats = transform_ptx(source_ptx, target)
         transformed_path = work_dir / f"{target.name}.ptx"
